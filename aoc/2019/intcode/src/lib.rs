@@ -1,23 +1,32 @@
-use std::io::{BufRead, Write};
+use std::collections::VecDeque;
 
 macro_rules! debug_println {
     ($($arg:tt)*) => (#[cfg(debug_assertions)] println!($($arg)*));
 }
 
-pub struct Intcode<R: BufRead, W: Write> {
-    pc: usize,
-    memory: Vec<isize>,
-    input: R,
-    output: W,
+#[derive(Debug, PartialEq)]
+enum ExecutionState {
+    WaitForInput,
+    Halted,
 }
 
-impl<R: BufRead, W: Write> Intcode<R, W> {
-    pub fn new(program: Vec<isize>, input: R, output: W) -> Self {
+pub struct Intcode {
+    pc: usize,
+    memory: Vec<isize>,
+    pub input: VecDeque<isize>,
+    pub output: VecDeque<isize>,
+    execution_state: Option<ExecutionState>,
+}
+
+
+impl Intcode {
+    pub fn new(program: Vec<isize>) -> Self {
         Intcode {
             pc: 0,
             memory: program,
-            input,
-            output,
+            input: VecDeque::new(),
+            output: VecDeque::new(),
+            execution_state: None,
         }
     }
 
@@ -27,6 +36,20 @@ impl<R: BufRead, W: Write> Intcode<R, W> {
 
     pub fn write_memory(&mut self, addr: usize, val: isize) {
         self.memory[addr] = val
+    }
+
+    pub fn is_halted(&self) -> bool {
+        self.execution_state.as_ref().map_or(false, |state| match state {
+            ExecutionState::Halted => true,
+            _ => false,
+        })
+    }
+
+    pub fn is_waiting(&self) -> bool {
+        self.execution_state.as_ref().map_or(false, |state| match state {
+            ExecutionState::WaitForInput => true,
+            _ => false,
+        })
     }
 
     fn parameter(&self, offset: usize, opcode: &Opcode) -> isize {
@@ -45,6 +68,7 @@ impl<R: BufRead, W: Write> Intcode<R, W> {
 
     /// Runs the program until it halts (executs opcode 99).
     pub fn run(&mut self) {
+        assert!(!self.is_halted());
         loop {
             debug_println!("pc = [{}], mem = [{:?}]", self.pc, self.memory);
             let opcode = Opcode::new(self.read_memory(self.pc as usize));
@@ -54,7 +78,7 @@ impl<R: BufRead, W: Write> Intcode<R, W> {
                     let p2 = self.parameter(2, &opcode);
                     let dst_addr = self.memory[self.pc + 3] as usize;
 
-                    //println/g!("mem[{}] = mem[{}] + mem[{}]", dst_addr, p1, p2);
+                    debug_println!("mem[{}] = mem[{}] + mem[{}]", dst_addr, p1, p2);
                     self.memory[dst_addr] = p1 + p2;
                     self.pc += 4;
                 }
@@ -63,32 +87,33 @@ impl<R: BufRead, W: Write> Intcode<R, W> {
                     let p2 = self.parameter(2, &opcode);
                     let dst_addr = self.memory[self.pc + 3] as usize;
 
-                    //println/g!("mem[{}] = mem[{}] + mem[{}]", dst_addr, p1, p2);
+                    debug_println!("mem[{}] = mem[{}] + mem[{}]", dst_addr, p1, p2);
                     self.memory[dst_addr] = p1 * p2;
                     self.pc += 4;
                 }
                 Operation::Input => {
-                    let mut input_line = String::new();
-                    self.input
-                        .read_line(&mut input_line)
-                        .expect("Failed to read line");
-
-                    //println/g!("");
-
-                    let input: isize = input_line.trim().parse().expect("Input not an integer");
-                    //println/g!("input: {}", input);
+                    if self.input.is_empty() {
+                        // assert!(!self.is_waiting());
+                        debug_println!("Waiting for next input");
+                        self.execution_state.replace(ExecutionState::WaitForInput);
+                        return;
+                    }
+                    let input = self.input.pop_front().unwrap();
+                    debug_println!("input: {}", input);
                     let dst_addr = self.memory[self.pc + 1] as usize;
                     self.memory[dst_addr] = input;
                     self.pc += 2;
                 }
                 Operation::Output => {
                     let p1 = self.parameter(1, &opcode);
-                    write!(&mut self.output, "OUTPUT> {}\n", p1).expect("could not write");
+                    debug_println!("output: {}", p1);
+                    self.output.push_back(p1);
                     self.pc += 2;
                 }
                 Operation::JumpIfTrue => {
                     let cond = self.parameter(1, &opcode);
                     let jmp_addr = self.parameter(2, &opcode);
+                    debug_println!("jump if true: cond {} target {}", cond, jmp_addr);
                     if cond != 0 {
                         self.pc = jmp_addr as usize;
                     } else {
@@ -98,6 +123,7 @@ impl<R: BufRead, W: Write> Intcode<R, W> {
                 Operation::JumpIfFalse => {
                     let cond = self.parameter(1, &opcode);
                     let jmp_addr = self.parameter(2, &opcode);
+                    debug_println!("jump if false: cond {} target {}", cond, jmp_addr);
                     if cond == 0 {
                         self.pc = jmp_addr as usize;
                     } else {
@@ -108,6 +134,7 @@ impl<R: BufRead, W: Write> Intcode<R, W> {
                     let p1 = self.parameter(1, &opcode);
                     let p2 = self.parameter(2, &opcode);
                     let dst_addr = self.memory[self.pc + 3] as usize;
+                    debug_println!("mem[{}] = {} < {}", dst_addr, p1, p2);
                     self.memory[dst_addr] = if p1 < p2 { 1 } else { 0 };
                     self.pc += 4;
                 }
@@ -115,10 +142,15 @@ impl<R: BufRead, W: Write> Intcode<R, W> {
                     let p1 = self.parameter(1, &opcode);
                     let p2 = self.parameter(2, &opcode);
                     let dst_addr = self.memory[self.pc + 3] as usize;
+                    debug_println!("mem[{}] = {} == {}", dst_addr, p1, p2);
                     self.memory[dst_addr] = if p1 == p2 { 1 } else { 0 };
                     self.pc += 4;
                 }
-                Operation::Halt => break,
+                Operation::Halt => {
+                    debug_println!("halt");
+                    self.execution_state.replace(ExecutionState::Halted);
+                    return;
+                }
             }
         }
     }
@@ -190,24 +222,13 @@ impl Opcode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
-
-    type TestIntcode = Intcode<Cursor<String>, Vec<u8>>;
-
-    fn intcode_no_input(program: Vec<isize>) -> TestIntcode {
-        Intcode::new(program, Cursor::new(String::new()), Vec::new())
-    }
-
-    fn intcode_with_input(program: Vec<isize>, input: String) -> TestIntcode {
-        Intcode::new(program, Cursor::new(input), Vec::new())
-    }
 
     #[test]
     fn test_csv_to_vec() {
         assert_eq!(csv_to_vec("1,2,3".to_string()), vec![1, 2, 3]);
     }
 
-    fn assert_memory(intcode: &TestIntcode, expected: Vec<isize>) {
+    fn assert_memory(intcode: &Intcode, expected: Vec<isize>) {
         for (addr, val) in expected.iter().enumerate() {
             assert_eq!(intcode.read_memory(addr), *val);
         }
@@ -215,7 +236,7 @@ mod tests {
 
     #[test]
     fn intcode_add() {
-        let mut intcode = intcode_no_input(vec![1, 0, 0, 0, 99]);
+        let mut intcode = Intcode::new(vec![1, 0, 0, 0, 99]);
         intcode.run();
         assert_memory(&intcode, vec![2, 0, 0, 0, 99]);
     }
@@ -223,12 +244,12 @@ mod tests {
     #[test]
     fn intcode_mul() {
         {
-            let mut intcode = intcode_no_input(vec![2, 3, 0, 3, 99]);
+            let mut intcode = Intcode::new(vec![2, 3, 0, 3, 99]);
             intcode.run();
             assert_memory(&intcode, vec![2, 3, 0, 6, 99]);
         }
         {
-            let mut intcode = intcode_no_input(vec![2, 4, 4, 5, 99, 0]);
+            let mut intcode = Intcode::new(vec![2, 4, 4, 5, 99, 0]);
             intcode.run();
             assert_memory(&intcode, vec![2, 4, 4, 5, 99, 9801]);
         }
@@ -236,31 +257,33 @@ mod tests {
 
     #[test]
     fn intcode_add_and_mul() {
-        let mut intcode = intcode_no_input(vec![1, 1, 1, 4, 99, 5, 6, 0, 99]);
+        let mut intcode = Intcode::new(vec![1, 1, 1, 4, 99, 5, 6, 0, 99]);
         intcode.run();
         assert_memory(&intcode, vec![30, 1, 1, 4, 2, 5, 6, 0, 99]);
     }
 
     #[test]
     fn intcode_parameters() {
-        let mut intcode = intcode_no_input(vec![1002,4,3,4,33]);
+        let mut intcode = Intcode::new(vec![1002,4,3,4,33]);
         intcode.run();
         assert_memory(&intcode, vec![1002, 4, 3, 4, 99]);
     }
 
     #[test]
     fn intcode_input() {
-        let mut intcode = intcode_with_input(vec![3, 0, 99], "1234\n".to_string());
+        let mut intcode = Intcode::new(vec![3, 0, 99]);
+        intcode.input.push_back(1234);
         intcode.run();
         assert_memory(&intcode, vec![1234, 0, 99]);
     }
 
     #[test]
     fn intcode_input_output() {
-        let mut intcode = intcode_with_input(vec![3, 0, 4, 0, 99], "1234\n".to_string());
+        let mut intcode = Intcode::new(vec![3, 0, 4, 0, 99]);
+        intcode.input.push_back(1234);
         intcode.run();
         assert_memory(&intcode, vec![1234, 0, 4, 0, 99]);
-        assert_eq!(String::from_utf8(intcode.output).expect("fail"), "OUTPUT> 1234\n");
+        assert_eq!(intcode.output.pop_front().unwrap(), 1234);
     }
 
     #[test]
