@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 macro_rules! debug_println {
     ($($arg:tt)*) => (#[cfg(debug_assertions)] println!($($arg)*));
@@ -12,107 +12,141 @@ enum ExecutionState {
 
 pub struct Intcode {
     pc: usize,
-    memory: Vec<isize>,
-    pub input: VecDeque<isize>,
-    pub output: VecDeque<isize>,
+    memory: HashMap<usize, i64>,
+    relative_base: i64,
+
+    pub input: VecDeque<i64>,
+    pub output: VecDeque<i64>,
     execution_state: Option<ExecutionState>,
 }
 
-
 impl Intcode {
-    pub fn new(program: Vec<isize>) -> Self {
+    pub fn new(program: Vec<i64>) -> Self {
+        let mut memory = HashMap::new();
+        for (addr, word) in program.iter().enumerate() {
+            memory.insert(addr, *word);
+        }
         Intcode {
             pc: 0,
-            memory: program,
+            memory,
+            relative_base: 0,
             input: VecDeque::new(),
             output: VecDeque::new(),
             execution_state: None,
         }
     }
 
-    pub fn read_memory(&self, addr: usize) -> isize {
-        self.memory[addr]
+    pub fn read_memory(&self, addr: usize) -> i64 {
+        *self.memory.get(&addr).unwrap_or(&0)
     }
 
-    pub fn write_memory(&mut self, addr: usize, val: isize) {
-        self.memory[addr] = val
+    pub fn write_memory(&mut self, addr: usize, val: i64) {
+        self.memory.insert(addr, val);
     }
 
     pub fn is_halted(&self) -> bool {
-        self.execution_state.as_ref().map_or(false, |state| match state {
-            ExecutionState::Halted => true,
-            _ => false,
-        })
+        self.execution_state
+            .as_ref()
+            .map_or(false, |state| match state {
+                ExecutionState::Halted => true,
+                _ => false,
+            })
     }
 
     pub fn is_waiting(&self) -> bool {
-        self.execution_state.as_ref().map_or(false, |state| match state {
-            ExecutionState::WaitForInput => true,
-            _ => false,
-        })
+        self.execution_state
+            .as_ref()
+            .map_or(false, |state| match state {
+                ExecutionState::WaitForInput => true,
+                _ => false,
+            })
     }
 
-    fn parameter(&self, offset: usize, opcode: &Opcode) -> isize {
-        let param = self.memory[self.pc + offset];
+    fn inp(&self, offset: usize, opcode: &Opcode) -> i64 {
+        let param = self.read_memory(self.pc + offset);
         match opcode.mode(offset) {
             Mode::Immediate => {
                 debug_println!("got immediate {}", param);
                 param
             }
             Mode::Position => {
-                debug_println!("got position: addr {} val {}", param, self.memory[param as usize]);
-                self.memory[param as usize]
+                debug_println!(
+                    "got position: addr {} val {}",
+                    param,
+                    self.read_memory(param as usize)
+                );
+                self.read_memory(param as usize)
+            }
+            Mode::Relative => {
+                let addr = self.relative_base + param;
+                let val = self.read_memory(addr as usize);
+                debug_println!("got relative: addr {} val {}", param, val);
+                val
             }
         }
     }
 
-    /// Runs the program until it halts (executs opcode 99).
+    fn outp(&mut self, offset: usize, val: i64, opcode: &Opcode) {
+        // Note: outp treated differently because it's basically writing to
+        // memory, but all other ones are reading.
+        let dst_addr = match opcode.mode(offset) {
+            Mode::Immediate => unreachable!(),
+            Mode::Position => {
+                debug_println!("\tposition output");
+                self.read_memory(self.pc + offset)
+            }
+            Mode::Relative => {
+                debug_println!("\trelative output, base = {}", self.relative_base);
+                self.read_memory(self.pc + offset) + self.relative_base
+            }
+        };
+
+        debug_println!("\tmem[{}] = {}", dst_addr, val);
+        self.write_memory(dst_addr as usize, val);
+    }
+
+    /// Runs the program until it halts (executes opcode 99).
     pub fn run(&mut self) {
         assert!(!self.is_halted());
         loop {
-            debug_println!("pc = [{}], mem = [{:?}]", self.pc, self.memory);
+            // debug_println!("pc = [{}], mem = [{:?}]", self.pc, self.memory);
             let opcode = Opcode::new(self.read_memory(self.pc as usize));
             match opcode.operation() {
                 Operation::Add => {
-                    let p1 = self.parameter(1, &opcode);
-                    let p2 = self.parameter(2, &opcode);
-                    let dst_addr = self.memory[self.pc + 3] as usize;
-
-                    debug_println!("mem[{}] = mem[{}] + mem[{}]", dst_addr, p1, p2);
-                    self.memory[dst_addr] = p1 + p2;
+                    let p1 = self.inp(1, &opcode);
+                    let p2 = self.inp(2, &opcode);
+                    debug_println!("add: {} + {}", p1, p2);
+                    self.outp(3, p1 + p2, &opcode);
                     self.pc += 4;
                 }
                 Operation::Mul => {
-                    let p1 = self.parameter(1, &opcode);
-                    let p2 = self.parameter(2, &opcode);
-                    let dst_addr = self.memory[self.pc + 3] as usize;
-
-                    debug_println!("mem[{}] = mem[{}] + mem[{}]", dst_addr, p1, p2);
-                    self.memory[dst_addr] = p1 * p2;
+                    let p1 = self.inp(1, &opcode);
+                    let p2 = self.inp(2, &opcode);
+                    debug_println!("mul: {} * {}", p1, p2);
+                    self.outp(3, p1 * p2, &opcode);
                     self.pc += 4;
                 }
                 Operation::Input => {
                     if self.input.is_empty() {
-                        // assert!(!self.is_waiting());
                         debug_println!("Waiting for next input");
                         self.execution_state.replace(ExecutionState::WaitForInput);
                         return;
                     }
+
                     let input = self.input.pop_front().unwrap();
                     debug_println!("input: {}", input);
-                    let dst_addr = self.memory[self.pc + 1] as usize;
-                    self.memory[dst_addr] = input;
+                    self.outp(1, input, &opcode);
                     self.pc += 2;
                 }
                 Operation::Output => {
-                    let p1 = self.parameter(1, &opcode);
+                    let p1 = self.inp(1, &opcode);
                     debug_println!("output: {}", p1);
                     self.output.push_back(p1);
                     self.pc += 2;
                 }
                 Operation::JumpIfTrue => {
-                    let cond = self.parameter(1, &opcode);
-                    let jmp_addr = self.parameter(2, &opcode);
+                    let cond = self.inp(1, &opcode);
+                    let jmp_addr = self.inp(2, &opcode);
                     debug_println!("jump if true: cond {} target {}", cond, jmp_addr);
                     if cond != 0 {
                         self.pc = jmp_addr as usize;
@@ -121,8 +155,8 @@ impl Intcode {
                     }
                 }
                 Operation::JumpIfFalse => {
-                    let cond = self.parameter(1, &opcode);
-                    let jmp_addr = self.parameter(2, &opcode);
+                    let cond = self.inp(1, &opcode);
+                    let jmp_addr = self.inp(2, &opcode);
                     debug_println!("jump if false: cond {} target {}", cond, jmp_addr);
                     if cond == 0 {
                         self.pc = jmp_addr as usize;
@@ -131,20 +165,24 @@ impl Intcode {
                     }
                 }
                 Operation::LessThan => {
-                    let p1 = self.parameter(1, &opcode);
-                    let p2 = self.parameter(2, &opcode);
-                    let dst_addr = self.memory[self.pc + 3] as usize;
-                    debug_println!("mem[{}] = {} < {}", dst_addr, p1, p2);
-                    self.memory[dst_addr] = if p1 < p2 { 1 } else { 0 };
+                    let p1 = self.inp(1, &opcode);
+                    let p2 = self.inp(2, &opcode);
+                    debug_println!("lt: {} < {}", p1, p2);
+                    self.outp(3, if p1 < p2 { 1 } else { 0 }, &opcode);
                     self.pc += 4;
                 }
                 Operation::Equals => {
-                    let p1 = self.parameter(1, &opcode);
-                    let p2 = self.parameter(2, &opcode);
-                    let dst_addr = self.memory[self.pc + 3] as usize;
-                    debug_println!("mem[{}] = {} == {}", dst_addr, p1, p2);
-                    self.memory[dst_addr] = if p1 == p2 { 1 } else { 0 };
+                    let p1 = self.inp(1, &opcode);
+                    let p2 = self.inp(2, &opcode);
+                    debug_println!("eq: {} == {}", p1, p2);
+                    self.outp(3, if p1 == p2 { 1 } else { 0 }, &opcode);
                     self.pc += 4;
+                }
+                Operation::AdjustRelativeBase => {
+                    let p1 = self.inp(1, &opcode);
+                    debug_println!("adj_rel_base: {} + {}", self.relative_base, p1);
+                    self.relative_base += p1;
+                    self.pc += 2;
                 }
                 Operation::Halt => {
                     debug_println!("halt");
@@ -156,11 +194,11 @@ impl Intcode {
     }
 }
 
-
-pub fn csv_to_vec(input: String) -> Vec<isize> {
+pub fn csv_to_vec(input: String) -> Vec<i64> {
     input
+        .trim()
         .split(",")
-        .map(|s| s.parse::<isize>().unwrap())
+        .map(|s| s.parse::<i64>().expect(&format!("{}", s)))
         .collect()
 }
 
@@ -174,6 +212,7 @@ enum Operation {
     JumpIfFalse,
     LessThan,
     Equals,
+    AdjustRelativeBase,
     Halt,
 }
 
@@ -181,15 +220,16 @@ enum Operation {
 enum Mode {
     Position,
     Immediate,
+    Relative,
 }
 
 #[derive(PartialEq, Debug)]
 struct Opcode {
-    orig: isize,
+    orig: i64,
 }
 
 impl Opcode {
-    fn new(instruction: isize) -> Self {
+    fn new(instruction: i64) -> Self {
         Self { orig: instruction }
     }
 
@@ -203,6 +243,7 @@ impl Opcode {
             6 => Operation::JumpIfFalse,
             7 => Operation::LessThan,
             8 => Operation::Equals,
+            9 => Operation::AdjustRelativeBase,
             99 => Operation::Halt,
             _ => unreachable!("{}", self.orig % 100),
         }
@@ -210,10 +251,11 @@ impl Opcode {
 
     fn mode(&self, n: usize) -> Mode {
         assert!(n >= 1);
-        let shifted = self.orig / (10 as isize).pow(1 + n as u32);
+        let shifted = self.orig / (10 as i64).pow(1 + n as u32);
         match shifted % 10 {
             0 => Mode::Position,
             1 => Mode::Immediate,
+            2 => Mode::Relative,
             _ => unreachable!(),
         }
     }
@@ -228,7 +270,7 @@ mod tests {
         assert_eq!(csv_to_vec("1,2,3".to_string()), vec![1, 2, 3]);
     }
 
-    fn assert_memory(intcode: &Intcode, expected: Vec<isize>) {
+    fn assert_memory(intcode: &Intcode, expected: Vec<i64>) {
         for (addr, val) in expected.iter().enumerate() {
             assert_eq!(intcode.read_memory(addr), *val);
         }
@@ -263,8 +305,8 @@ mod tests {
     }
 
     #[test]
-    fn intcode_parameters() {
-        let mut intcode = Intcode::new(vec![1002,4,3,4,33]);
+    fn intcode_inps() {
+        let mut intcode = Intcode::new(vec![1002, 4, 3, 4, 33]);
         intcode.run();
         assert_memory(&intcode, vec![1002, 4, 3, 4, 99]);
     }
@@ -297,5 +339,32 @@ mod tests {
         assert_eq!(opcode.mode(1), Mode::Position);
         assert_eq!(opcode.mode(2), Mode::Immediate);
         assert_eq!(opcode.mode(3), Mode::Position);
+    }
+
+    #[test]
+    fn quine() {
+        let program = vec![
+            109, 1, 204, -1, 1001, 100, 1, 100, 1008, 100, 16, 101, 1006, 101, 0, 99,
+        ];
+        let mut intcode = Intcode::new(program.clone());
+        intcode.run();
+        let output: Vec<i64> = intcode.output.into();
+        assert_eq!(program, output);
+    }
+
+    #[test]
+    fn bignum() {
+        let program = vec![1102, 34915192, 34915192, 7, 4, 7, 99, 0];
+        let mut intcode = Intcode::new(program);
+        intcode.run();
+        assert_eq!(intcode.output.pop_front().unwrap(), 1219070632396864);
+    }
+
+    #[test]
+    fn bignum2() {
+        let program = vec![104, 1125899906842624, 99];
+        let mut intcode = Intcode::new(program);
+        intcode.run();
+        assert_eq!(intcode.output.pop_front().unwrap(), 1125899906842624);
     }
 }
