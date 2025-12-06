@@ -10,7 +10,7 @@ struct Map {
 type Route = Vec<String>;
 
 fn route_encoding_len(route: &Route) -> usize {
-    route.iter().map(|x| x.len() + 1).sum()
+    route.iter().map(|x| x.len() + 1).sum::<usize>()
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -277,6 +277,120 @@ impl Map {
         finished_routes
     }
 
+    fn compress_one_greedy2(&self, route: &Route, plan_name: &str) -> (Route, Route) {
+        println!("to_compress");
+        for (i, r) in route.iter().enumerate() {
+            print!("({i}, {r}) ");
+        }
+        println!("");
+
+        let mut plan = vec![route[0].clone(), route[1].clone()];
+        let mut candidates = HashSet::new();
+        let mut upper_bound = usize::max_value();
+        for i in 2..route.len() - 1 {
+            if route[i] == plan[0] && route[i + 1] == plan[1] {
+                candidates.insert(i);
+                upper_bound = std::cmp::min(upper_bound, i);
+            }
+        }
+
+        assert!(upper_bound > 2);
+        let mut i = 2;
+        while i < route.len() - 1 {
+            if candidates.contains(&i) {
+                // pray it's not tricky
+                break;
+            }
+
+            let next_chunk = vec![route[i].clone(), route[i + 1].clone()];
+            let next_chunk_len = route_encoding_len(&next_chunk);
+
+            println!(
+                "plan len {} next_chunk_len {} plan {:?}",
+                route_encoding_len(&plan),
+                next_chunk_len,
+                plan
+            );
+            if route_encoding_len(&plan) + next_chunk_len > 20 {
+                println!(
+                    "too long, exit now: plan is {:?}, len= {:?} + {:?}",
+                    plan,
+                    route_encoding_len(&plan),
+                    next_chunk_len,
+                );
+                break;
+            }
+
+            if route[i] == "A" || route[i] == "B" || route[i] == "C" {
+                // hack lol
+                break;
+            }
+
+            let mut next_candidates = HashSet::new();
+            for cand in candidates.iter() {
+                if cand + i + 1 >= route.len() {
+                    continue;
+                }
+
+                println!(
+                    "\tcandidate at {} shows {}{} (expect {}{})",
+                    cand,
+                    route[cand + i],
+                    route[cand + i + 1],
+                    route[i],
+                    route[i + 1],
+                );
+
+                if route[cand + i] != route[i] || route[cand + i + 1] != route[i + 1] {
+                    println!("\t\tremoved {}", cand);
+                    continue;
+                }
+
+                next_candidates.insert(*cand);
+            }
+
+            println!(
+                "pattern len {i}, next candidates len {}",
+                next_candidates.len()
+            );
+            if next_candidates.len() == 0 {
+                println!("exiting, plan is {:?}", &route[0..i]);
+                break;
+            }
+
+            plan.push(route[i].clone());
+            plan.push(route[i + 1].clone());
+            candidates = next_candidates;
+            i += 2;
+            println!(
+                "continuing: plan {:?}, i {i}, upper {upper_bound}",
+                &route[0..i]
+            );
+        }
+
+        let mut compressed_route = vec![];
+        candidates.insert(0);
+        i = 0;
+        while i < route.len() {
+            if candidates.contains(&i) {
+                compressed_route.push(plan_name.to_string());
+                i += plan.len();
+            } else {
+                compressed_route.push(route[i].clone());
+                i += 1;
+            }
+        }
+
+        println!(
+            "old len {}, compressed len {}, plan len {}",
+            route.len(),
+            compressed_route.len(),
+            plan.len()
+        );
+        println!("compressed {:?}, plan {:?}", compressed_route, plan);
+        (compressed_route, plan)
+    }
+
     // returns the compressed route and the route plan
     fn compress_one_greedy(&self, route: &Route, plan_name: &str) -> (Route, Route) {
         println!("to_compress");
@@ -284,6 +398,7 @@ impl Map {
             print!("({i}, {r}) ");
         }
         println!("");
+
         let mut plan = vec![route[0].clone(), route[1].clone()];
         let mut candidates = HashSet::new();
         for i in 2..route.len() - 1 {
@@ -295,7 +410,7 @@ impl Map {
         // try to extend the pattern but only so that the total number of items compressed
         // increases.
         let mut pattern_len = 1;
-        for i in 2..route.len() {
+        for i in 2..route.len() - 1 {
             if candidates.contains(&i) {
                 // pray it's not tricky
                 break;
@@ -379,9 +494,9 @@ impl Map {
     // |route| is effectively a string. We basically want to find if we can break up the string
     // into 3 repeated patterns. It's sort of a compression problem?
     fn try_plan_route(&self, route: &Route) -> Option<RoutePlan> {
-        let (route, route_a) = self.compress_one_greedy(route, "A");
-        let (route, route_b) = self.compress_one_greedy(&route[1..].to_vec(), "B");
-        let (route, route_c) = self.compress_one_greedy(&route[2..].to_vec(), "C");
+        let (route, route_a) = self.compress_one_greedy2(route, "A");
+        let (route, route_b) = self.compress_one_greedy2(&route[1..].to_vec(), "B");
+        let (route, route_c) = self.compress_one_greedy2(&route[2..].to_vec(), "C");
 
         // trust me
         let mut full_route = vec!["A".to_string(), "B".to_string(), "A".to_string()];
@@ -436,7 +551,7 @@ fn commit_route(cpu: &mut Intcode, route: &Route) {
 }
 
 fn main() {
-    let program = std::fs::read_to_string("program2.txt").unwrap();
+    let program = std::fs::read_to_string("program.txt").unwrap();
     let map = {
         let mut cpu = Intcode::new(csv_to_vec(program.clone()));
 
@@ -477,28 +592,28 @@ fn main() {
 
     let full_plan = map.try_plan_route(&route[0]).unwrap();
 
-    // commit_route(&mut cpu, &full_plan.main_routine);
-    // commit_route(&mut cpu, &full_plan.routine_a.unwrap());
-    // commit_route(&mut cpu, &full_plan.routine_b.unwrap());
-    // commit_route(&mut cpu, &full_plan.routine_c.unwrap());
+    commit_route(&mut cpu, &full_plan.main_routine);
+    commit_route(&mut cpu, &full_plan.routine_a.unwrap());
+    commit_route(&mut cpu, &full_plan.routine_b.unwrap());
+    commit_route(&mut cpu, &full_plan.routine_c.unwrap());
 
-    // cpu.input.push_back('n' as i64);
-    // cpu.input.push_back(10);
+    cpu.input.push_back('n' as i64);
+    cpu.input.push_back(10);
 
-    // println!("INPUT: =====");
-    // for i in cpu.input.iter() {
-    //     print!("{}", *i as u8 as char);
-    // }
-    // print!("======\n");
+    println!("INPUT: =====");
+    for i in cpu.input.iter() {
+        print!("{}", *i as u8 as char);
+    }
+    print!("======\n");
 
-    // while !cpu.is_halted() {
-    //     cpu.run();
-    //     // let map  = String::from_utf8(cpu.output.clone().into_iter().map(|x| x as u8).collect::<Vec<u8>>()).unwrap();
-    //     // let map = Map::new(map);
+    while !cpu.is_halted() {
+        cpu.run();
+        // let map  = String::from_utf8(cpu.output.clone().into_iter().map(|x| x as u8).collect::<Vec<u8>>()).unwrap();
+        // let map = Map::new(map);
 
-    //     // cpu.output.clear();
-    //     // map.render();
-    // }
-    // println!("output len {:?}", cpu.output.len());
-    // println!("output: {:?}", cpu.output.pop_back().unwrap());
+        // cpu.output.clear();
+        // map.render();
+    }
+    println!("output len {:?}", cpu.output.len());
+    println!("output: {:?}", cpu.output.pop_back().unwrap());
 }
