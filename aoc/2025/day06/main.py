@@ -14,20 +14,20 @@ def parse(s: str):
             curr = c
         else:
             if c != " ":
-                ops.append(curr[:-1])
+                ops.append(curr)
                 curr = c
             else:
                 curr += c
-    ops.append(curr)
+    ops.append(curr + " ")
 
     problems = [[op] for op in ops]
     for line in by_line[:-1]:
         i = 0
         for problem, op in zip(problems, ops):
             expected_size = len(op)
-            acc = line[i : i + expected_size + 1]
+            acc = line[i : i + expected_size]
             problem.append(acc)
-            i += expected_size + 1
+            i += expected_size
 
     return problems
 
@@ -79,7 +79,6 @@ def p2(problems: list) -> int:
     res = 0
     for op, operand in zip(ops, operands):
         op = op_map[op.strip()]
-        # print(op)
         acc = int(operand[0])
         ops = operand[1:]
         for o in ops:

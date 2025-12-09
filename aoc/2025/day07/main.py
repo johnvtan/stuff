@@ -54,7 +54,6 @@ def p2(lines: list[str]) -> int:
         if row >= num_rows:
             return 1
 
-        # todo: base case
         if (row, col) not in cache:
             if lines[row][col] == "^":
                 cache[(row, col)] = count_timelines_to(
@@ -66,7 +65,6 @@ def p2(lines: list[str]) -> int:
         return cache[(row, col)]
 
     return count_timelines_to(1, lines[0].find("S"))
-
 
 print(p1(lines))
 print(p2(lines))
