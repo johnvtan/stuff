@@ -66,5 +66,6 @@ def p2(lines: list[str]) -> int:
 
     return count_timelines_to(1, lines[0].find("S"))
 
+
 print(p1(lines))
 print(p2(lines))
